@@ -9,7 +9,8 @@ from homeassistant.const import UnitOfTemperature, UnitOfTime
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers import translation
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.components.number import NumberEntity, NumberEntityDescription
+from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberEntityDescription, NumberMode
+from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +43,14 @@ default_values = {
 }
 
 
+GENERIC_SETTING_NUMBERS = False
+
+WINE_COOLER_ZONES = {
+    "tempSel": "zone 1",
+    "tempSelZ2": "zone 2",
+}
+
+
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
     hon = hass.data[DOMAIN][entry.unique_id]
     translations = await translation.async_get_translations(
@@ -52,6 +61,15 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
     for appliance in hon.appliances:
         coordinator = await hon.async_get_coordinator(appliance)
         device = coordinator.device
+
+        if device.appliance_type == "WC":
+            for key, zone_name in WINE_COOLER_ZONES.items():
+                if HonWineCoolerTemperature.program_ranges(device, key):
+                    appliances.append(HonWineCoolerTemperature(coordinator, appliance, key, zone_name))
+
+        # Generic numbers built from the device settings are not enabled yet
+        if not GENERIC_SETTING_NUMBERS:
+            continue
 
         #command = device.settings_command()
 
@@ -202,3 +220,59 @@ class HonNumber(HonBaseNumberEntity):
         return super().available and self._device.has_current_setting(
             self.entity_description.key
         )
+
+
+class HonWineCoolerTemperature(HonBaseNumberEntity):
+    """Target temperature of a wine cooler zone.
+
+    Wine coolers set the temperature through programs (e.g. sparkling, white, red),
+    each one allowing a different range. The matching program is selected from the value.
+    """
+
+    def __init__(self, coordinator, appliance, key, zone_name) -> None:
+        super().__init__(coordinator, appliance, key, f"Target temperature {zone_name}")
+        self._attr_unique_id = f"{self._mac}-wine-cooler-{key}"
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
+        self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_icon = "mdi:thermometer"
+        self._attr_mode = NumberMode.BOX
+
+        ranges = self.program_ranges(self._device, key)
+        self._attr_native_min_value = min(parameter.min for parameter in ranges.values())
+        self._attr_native_max_value = max(parameter.max for parameter in ranges.values())
+        self._attr_native_step = min(parameter.step for parameter in ranges.values())
+
+    @staticmethod
+    def program_ranges(device, key):
+        command = device.commands.get("startProgram")
+        if command is None:
+            return {}
+        result = {}
+        for program, program_command in command.get_programs().items():
+            parameter = program_command.parameters.get(key)
+            if isinstance(parameter, HonParameterRange):
+                result[program] = parameter
+        return result
+
+    def coordinator_update(self):
+        try:
+            self._attr_native_value = float(str(self._device.get(self._key)).replace(",", "."))
+        except (TypeError, ValueError):
+            self._attr_native_value = None
+
+    async def async_set_native_value(self, value: float) -> None:
+        value = int(value) if float(value).is_integer() else value
+        program = next(
+            (name for name, parameter in self.program_ranges(self._device, self._key).items()
+             if parameter.min <= value <= parameter.max),
+            None,
+        )
+        if program is None:
+            raise HomeAssistantError(f"No program allows {value}°C for {self._key}")
+
+        # The other zone keeps its current value if the program allows it, otherwise the program default is used
+        await self._device.start_command(program, {self._key: value}).send()
+        self._device.set(self._key, str(value))
+        self._attr_native_value = float(value)
+        self.async_write_ha_state()
+        await self.coordinator.async_request_refresh()
