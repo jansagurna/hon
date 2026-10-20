@@ -229,6 +229,8 @@ class HonWineCoolerTemperature(HonBaseNumberEntity):
     each one allowing a different range. The matching program is selected from the value.
     """
 
+    _attr_native_step = 1
+
     def __init__(self, coordinator, appliance, key, zone_name) -> None:
         super().__init__(coordinator, appliance, key, f"Target temperature {zone_name}")
         self._attr_unique_id = f"{self._mac}-wine-cooler-{key}"
@@ -241,6 +243,7 @@ class HonWineCoolerTemperature(HonBaseNumberEntity):
         self._attr_native_min_value = min(parameter.min for parameter in ranges.values())
         self._attr_native_max_value = max(parameter.max for parameter in ranges.values())
         self._attr_native_step = min(parameter.step for parameter in ranges.values())
+        self.coordinator_update()
 
     @staticmethod
     def program_ranges(device, key):
@@ -257,7 +260,8 @@ class HonWineCoolerTemperature(HonBaseNumberEntity):
     def coordinator_update(self):
         try:
             value = float(str(self._device.get(self._key)).replace(",", "."))
-            self._attr_native_value = int(value) if value.is_integer() else value
+            # The appliance stores whole °F values, so e.g. 13°C is reported as 12.8°C
+            self._attr_native_value = round(value) if isinstance(self._attr_native_step, int) else value
         except (TypeError, ValueError):
             self._attr_native_value = None
 
@@ -271,8 +275,15 @@ class HonWineCoolerTemperature(HonBaseNumberEntity):
         if program is None:
             raise HomeAssistantError(f"No program allows {value}°C for {self._key}")
 
-        # The other zone keeps its current value if the program allows it, otherwise the program default is used
-        await self._device.start_command(program, {self._key: value}).send()
+        # The other zones keep their current value if the program allows it, otherwise the program default is used
+        parameters = {}
+        for key in WINE_COOLER_ZONES:
+            try:
+                parameters[key] = round(float(str(self._device.get(key)).replace(",", ".")))
+            except (TypeError, ValueError):
+                pass
+        parameters[self._key] = value
+        await self._device.start_command(program, parameters).send()
         self._device.set(self._key, str(value))
         self._attr_native_value = value
         self.async_write_ha_state()
