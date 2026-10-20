@@ -256,7 +256,8 @@ class HonWineCoolerTemperature(HonBaseNumberEntity):
 
     def coordinator_update(self):
         try:
-            self._attr_native_value = float(str(self._device.get(self._key)).replace(",", "."))
+            value = float(str(self._device.get(self._key)).replace(",", "."))
+            self._attr_native_value = int(value) if value.is_integer() else value
         except (TypeError, ValueError):
             self._attr_native_value = None
 
@@ -273,6 +274,6 @@ class HonWineCoolerTemperature(HonBaseNumberEntity):
         # The other zone keeps its current value if the program allows it, otherwise the program default is used
         await self._device.start_command(program, {self._key: value}).send()
         self._device.set(self._key, str(value))
-        self._attr_native_value = float(value)
+        self._attr_native_value = value
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
